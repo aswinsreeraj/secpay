@@ -111,7 +111,7 @@ func (r *postgresAccountRepository) TransferBalance(ctx context.Context, fromAcc
 			ToAccountID:     toAccountID,
 			Amount:          amount,
 			TransactionType: "transfer",
-			Status:          "completed",
+			Status:          domain.TransactionStateSuccess,
 			Description:     description,
 			CreatedAt:       time.Now(),
 		}

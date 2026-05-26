@@ -35,3 +35,7 @@ func (r *postgresTransactionRepository) GetByAccountID(ctx context.Context, acco
 	}
 	return txs, nil
 }
+
+func (r *postgresTransactionRepository) Update(ctx context.Context, tx *domain.Transaction) error {
+	return r.db.WithContext(ctx).Save(tx).Error
+}

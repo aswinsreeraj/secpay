@@ -28,7 +28,7 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	}
 
 	log.Println("Running GORM auto-migrations...")
-	err = db.AutoMigrate(&domain.User{}, &domain.Account{}, &domain.Transaction{})
+	err = db.AutoMigrate(&domain.User{}, &domain.Account{}, &domain.Transaction{}, &domain.Idempotency{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to run database auto-migrations: %w", err)
 	}

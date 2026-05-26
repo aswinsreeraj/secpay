@@ -12,7 +12,7 @@ func TestTransaction_Validate(t *testing.T) {
 		ToAccountID:     "d9c66e92-d6c5-4ad8-a89c-a1112b36bbf4",
 		Amount:          15000, // 150.00
 		TransactionType: "transfer",
-		Status:          "pending",
+		Status:          "initiated",
 		Description:     "Rent payment",
 		CreatedAt:       time.Now(),
 	}
@@ -73,7 +73,7 @@ func TestTransaction_Validate(t *testing.T) {
 
 	t.Run("invalid status", func(t *testing.T) {
 		invalidTx := *validTransaction
-		invalidTx.Status = "processing"
+		invalidTx.Status = "completed"
 		if err := invalidTx.Validate(); err == nil {
 			t.Error("expected error for invalid status, got nil")
 		}

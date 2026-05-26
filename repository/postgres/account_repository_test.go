@@ -66,7 +66,7 @@ func TestAccountRepository_TransferBalance(t *testing.T) {
 
 		// 5. Expect transaction audit log record insert
 		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "transactions" ("id","from_account_id","to_account_id","amount","transaction_type","status","description","created_at") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`)).
-			WithArgs(sqlmock.AnyArg(), senderID, receiverID, int64(2000), "transfer", "completed", "Rent payment", sqlmock.AnyArg()).
+			WithArgs(sqlmock.AnyArg(), senderID, receiverID, int64(2000), "transfer", "success", "Rent payment", sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 
 		// 6. Transaction commits
@@ -146,7 +146,7 @@ func TestAccountRepository_TransferBalance(t *testing.T) {
 
 		// 5. Audit log insert fails (simulated DB error)
 		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "transactions" ("id","from_account_id","to_account_id","amount","transaction_type","status","description","created_at") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`)).
-			WithArgs(sqlmock.AnyArg(), senderID, receiverID, int64(2000), "transfer", "completed", "Rent payment", sqlmock.AnyArg()).
+			WithArgs(sqlmock.AnyArg(), senderID, receiverID, int64(2000), "transfer", "success", "Rent payment", sqlmock.AnyArg()).
 			WillReturnError(errors.New("db disk full"))
 
 		// 6. Transaction rolls back completely (so that no partial balance changes are committed)
