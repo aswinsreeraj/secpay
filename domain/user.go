@@ -15,6 +15,7 @@ type User struct {
 	Name      string    `json:"name" validate:"required,min=2,max=100"`
 	Email     string    `json:"email" validate:"required,email" gorm:"uniqueIndex"`
 	Password  string    `json:"password" validate:"required,min=8"`
+	KYCStatus string    `json:"kyc_status" validate:"required,oneof=pending approved rejected"`
 	CreatedAt time.Time `json:"created_at" validate:"required"`
 	UpdatedAt time.Time `json:"updated_at" validate:"required"`
 }
@@ -29,4 +30,5 @@ type UserRepository interface {
 	Create(ctx context.Context, user *User) error
 	GetByID(ctx context.Context, id string) (*User, error)
 	GetByEmail(ctx context.Context, email string) (*User, error)
+	Update(ctx context.Context, user *User) error
 }

@@ -11,6 +11,7 @@ func TestUser_Validate(t *testing.T) {
 		Name:      "John Doe",
 		Email:     "john.doe@example.com",
 		Password:  "password123",
+		KYCStatus: "pending",
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -58,6 +59,14 @@ func TestUser_Validate(t *testing.T) {
 		invalidUser.Password = "1234567"
 		if err := invalidUser.Validate(); err == nil {
 			t.Error("expected error for password too short, got nil")
+		}
+	})
+
+	t.Run("invalid KYC status", func(t *testing.T) {
+		invalidUser := *validUser
+		invalidUser.KYCStatus = "unknown"
+		if err := invalidUser.Validate(); err == nil {
+			t.Error("expected error for invalid KYC status, got nil")
 		}
 	})
 }
