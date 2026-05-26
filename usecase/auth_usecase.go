@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"secpay/domain"
@@ -21,23 +22,33 @@ type AuthUsecase interface {
 
 type authUsecase struct {
 	userRepo  domain.UserRepository
+	auditRepo domain.AuditLogRepository
 	jwtSecret []byte
 }
 
-// NewAuthUsecase creates a concrete AuthUsecase instance.
-func NewAuthUsecase(userRepo domain.UserRepository, jwtSecret string) AuthUsecase {
+// NewAuthUsecase creates a concrete AuthUsecase instance with AuditLogRepository injected.
+func NewAuthUsecase(userRepo domain.UserRepository, auditRepo domain.AuditLogRepository, jwtSecret string) AuthUsecase {
 	return &authUsecase{
 		userRepo:  userRepo,
+		auditRepo: auditRepo,
 		jwtSecret: []byte(jwtSecret),
 	}
 }
 
 func (u *authUsecase) Register(ctx context.Context, name, email, password string) (*domain.User, error) {
 	if len(password) < 8 {
-		return nil, errors.New("password must be at least 8 characters long")
+		err := errors.New("password must be at least 8 characters long")
+		_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    "unknown",
+			Action:    "register",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Failed registration for email %s: %v", email, err),
+		})
+		return nil, err
 	}
 
-	// Hash password securely using bcrypt
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
@@ -48,18 +59,44 @@ func (u *authUsecase) Register(ctx context.Context, name, email, password string
 		Name:      name,
 		Email:     email,
 		Password:  string(hashedPassword),
-		KYCStatus: "pending", // Default status
+		KYCStatus: "pending",
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
 	if err := user.Validate(); err != nil {
+		_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    "unknown",
+			Action:    "register",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Validation failed for email %s: %v", email, err),
+		})
 		return nil, err
 	}
 
 	if err := u.userRepo.Create(ctx, user); err != nil {
+		_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    "unknown",
+			Action:    "register",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Database creation failed for email %s: %v", email, err),
+		})
 		return nil, err
 	}
+
+	// Auditing registration success
+	_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now(),
+		UserID:    user.ID,
+		Action:    "register",
+		Status:    "success",
+		Details:   fmt.Sprintf("User %s successfully registered", email),
+	})
 
 	return user, nil
 }
@@ -67,19 +104,35 @@ func (u *authUsecase) Register(ctx context.Context, name, email, password string
 func (u *authUsecase) Login(ctx context.Context, email, password string) (string, error) {
 	user, err := u.userRepo.GetByEmail(ctx, email)
 	if err != nil {
-		return "", errors.New("invalid credentials")
+		loginErr := errors.New("invalid credentials")
+		_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    "unknown",
+			Action:    "login",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Failed login for email %s: user not found", email),
+		})
+		return "", loginErr
 	}
 
-	// Compare bcrypt hash with password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
-		return "", errors.New("invalid credentials")
+		loginErr := errors.New("invalid credentials")
+		_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    user.ID,
+			Action:    "login",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Failed login for email %s: password mismatch", email),
+		})
+		return "", loginErr
 	}
 
-	// Generate standard JWT token with claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   user.ID,
 		"email": user.Email,
-		"exp":   time.Now().Add(time.Hour * 24).Unix(), // 24 hours expiry
+		"exp":   time.Now().Add(time.Hour * 24).Unix(),
 	})
 
 	tokenString, err := token.SignedString(u.jwtSecret)
@@ -87,11 +140,19 @@ func (u *authUsecase) Login(ctx context.Context, email, password string) (string
 		return "", err
 	}
 
+	// Auditing login success
+	_ = u.auditRepo.Create(ctx, &domain.AuditLog{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now(),
+		UserID:    user.ID,
+		Action:    "login",
+		Status:    "success",
+		Details:   fmt.Sprintf("User %s successfully logged in", email),
+	})
+
 	return tokenString, nil
 }
 
-// VerifyMFA simulates Time-Based One-Time Password validation.
-// For mock purposes, it accepts "123456" as the valid code.
 func (u *authUsecase) VerifyMFA(ctx context.Context, code string) (bool, error) {
 	if code == "123456" {
 		return true, nil

@@ -26,6 +26,7 @@ type workerPool struct {
 	paymentUsecase  PaymentUsecase
 	idempotencyRepo domain.IdempotencyRepository
 	txRepo          domain.TransactionRepository
+	auditRepo       domain.AuditLogRepository
 	numWorkers      int
 	queue           chan domain.PaymentJob
 	metrics         domain.WorkerMetrics
@@ -35,11 +36,12 @@ type workerPool struct {
 	isStopped       bool
 }
 
-// NewWorkerPool initializes the WorkerPool manager.
+// NewWorkerPool initializes the WorkerPool manager with AuditLogRepository injected.
 func NewWorkerPool(
 	paymentUsecase PaymentUsecase,
 	idempotencyRepo domain.IdempotencyRepository,
 	txRepo domain.TransactionRepository,
+	auditRepo domain.AuditLogRepository,
 	numWorkers int,
 	queueSize int,
 ) WorkerPool {
@@ -47,6 +49,7 @@ func NewWorkerPool(
 		paymentUsecase:  paymentUsecase,
 		idempotencyRepo: idempotencyRepo,
 		txRepo:          txRepo,
+		auditRepo:       auditRepo,
 		numWorkers:      numWorkers,
 		queue:           make(chan domain.PaymentJob, queueSize),
 		stopChan:        make(chan struct{}),
@@ -125,10 +128,20 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 		ctx = context.Background()
 	}
 
+	// 1. Audit payment attempt
+	_ = p.auditRepo.Create(ctx, &domain.AuditLog{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now(),
+		UserID:    "system",
+		Action:    "payment_attempt",
+		Status:    "initiated",
+		Details:   fmt.Sprintf("Payment job %s: transferring %d from %s to %s", job.ID, job.Amount, job.FromAccountID, job.ToAccountID),
+	})
+
 	txRecord, err := p.paymentUsecase.ProcessPayment(ctx, job.FromAccountID, job.ToAccountID, job.Amount, job.Description)
 	if err != nil {
 		if err == ErrTransient {
-			// 1. Temporary failure: check if we should retry
+			// Temporary failure: check if we should retry
 			if job.RetryCount < job.MaxRetries {
 				p.metrics.IncrementRetried()
 				job.RetryCount++
@@ -136,9 +149,19 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 				log.Printf("[Worker] Temporary failure for job %s. Retrying in %v (Retry %d/%d)...",
 					job.ID, job.Backoff, job.RetryCount, job.MaxRetries)
 
+				// Audit temporary failure retry event
+				_ = p.auditRepo.Create(ctx, &domain.AuditLog{
+					ID:        uuid.NewString(),
+					Timestamp: time.Now(),
+					UserID:    "system",
+					Action:    "payment_retry",
+					Status:    "retry",
+					Details:   fmt.Sprintf("Payment job %s temporary fail: scheduled retry %d/%d in %v", job.ID, job.RetryCount, job.MaxRetries, job.Backoff),
+				})
+
 				// Asynchronous non-blocking retry using time.AfterFunc
 				time.AfterFunc(job.Backoff, func() {
-					job.Backoff *= 2 // Exponential backoff scaling
+					job.Backoff *= 2
 					p.mu.Lock()
 					defer p.mu.Unlock()
 					if !p.isStopped {
@@ -151,7 +174,7 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 			// Max retries exceeded for transient error
 			err = fmt.Errorf("transaction failed after %d retries: database transient error", job.MaxRetries)
 			
-			// Generate and write failed transaction log to DB
+			// Generate failed transaction log record
 			txRecord = &domain.Transaction{
 				ID:              uuid.NewString(),
 				FromAccountID:   job.FromAccountID,
@@ -165,9 +188,19 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 			_ = p.txRepo.Create(ctx, txRecord)
 		}
 
-		// 2. Terminal failure (or max retries exceeded): cache the failed payload
+		// Terminal failure (or max retries exceeded): cache the failed payload
 		p.metrics.IncrementFailed()
 		p.metrics.IncrementProcessed()
+
+		// Audit terminal failure event
+		_ = p.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:        uuid.NewString(),
+			Timestamp: time.Now(),
+			UserID:    "system",
+			Action:    "payment_failed",
+			Status:    "failed",
+			Details:   fmt.Sprintf("Payment job %s terminal failed: %v", job.ID, err),
+		})
 		
 		responseObj := map[string]interface{}{
 			"error":       err.Error(),
@@ -177,8 +210,19 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 		return
 	}
 
-	// 3. Success path: cache success payload
+	// Success path: cache success payload
 	p.metrics.IncrementProcessed()
+
+	// Audit success event
+	_ = p.auditRepo.Create(ctx, &domain.AuditLog{
+		ID:        uuid.NewString(),
+		Timestamp: time.Now(),
+		UserID:    "system",
+		Action:    "payment_success",
+		Status:    "success",
+		Details:   fmt.Sprintf("Payment job %s processed successfully: transaction %s", job.ID, txRecord.ID),
+	})
+
 	responseObj := map[string]interface{}{
 		"message":     "Payment processed successfully",
 		"transaction": txRecord,

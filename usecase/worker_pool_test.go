@@ -70,18 +70,41 @@ func (m *mockTxRepo) GetByAccountID(ctx context.Context, accountID string) ([]*d
 	return m.transactions, nil
 }
 
+// mockAuditLogRepo for async tests
+type mockAuditLogRepo struct {
+	domain.AuditLogRepository
+	mu   sync.Mutex
+	logs []*domain.AuditLog
+}
+
+func newMockAuditLogRepo() *mockAuditLogRepo {
+	return &mockAuditLogRepo{}
+}
+
+func (m *mockAuditLogRepo) Create(ctx context.Context, log *domain.AuditLog) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logs = append(m.logs, log)
+	return nil
+}
+
+func (m *mockAuditLogRepo) GetByUserID(ctx context.Context, userID string) ([]*domain.AuditLog, error) {
+	return nil, nil
+}
+
 func TestWorkerPool_ConcurrencyAndLoad(t *testing.T) {
 	accRepo := &mockAccountRepository{}
 	txRepo := newMockTxRepo()
 	idempotencyRepo := newMockIdempotencyRepo()
+	auditRepo := newMockAuditLogRepo()
 
 	// 1. Success usecase setup
 	u := NewPaymentUsecase(accRepo, txRepo)
-	pool := NewWorkerPool(u, idempotencyRepo, txRepo, 4, 100) // 4 concurrent workers
+	pool := NewWorkerPool(u, idempotencyRepo, txRepo, auditRepo, 4, 100) // 4 concurrent workers
 	pool.Start()
 	defer pool.Stop()
 
-	// 2. Spawn 50 concurrent payment jobs under load to verify thread safety (go test -race)
+	// 2. Spawn 50 concurrent payment jobs under load to verify thread safety
 	numJobs := 50
 	var wg sync.WaitGroup
 	wg.Add(numJobs)
@@ -137,9 +160,10 @@ func TestWorkerPool_ExponentialBackoffRetry(t *testing.T) {
 	accRepo := &mockAccountRepository{}
 	txRepo := newMockTxRepo()
 	idempotencyRepo := newMockIdempotencyRepo()
+	auditRepo := newMockAuditLogRepo()
 
 	u := NewPaymentUsecase(accRepo, txRepo)
-	pool := NewWorkerPool(u, idempotencyRepo, txRepo, 2, 10)
+	pool := NewWorkerPool(u, idempotencyRepo, txRepo, auditRepo, 2, 10)
 	pool.Start()
 	defer pool.Stop()
 
@@ -166,7 +190,6 @@ func TestWorkerPool_ExponentialBackoffRetry(t *testing.T) {
 	_ = pool.Enqueue(job)
 
 	// Allow enough time for all retries and exponential backoff timers to trigger
-	// Attempts at 0ms, ~5ms, ~10ms. Total ~20ms, so 100ms is extremely generous
 	time.Sleep(100 * time.Millisecond)
 
 	metrics := pool.GetMetrics()
@@ -194,4 +217,11 @@ func TestWorkerPool_ExponentialBackoffRetry(t *testing.T) {
 	if rec.Status != "completed" || rec.ResponseCode != 400 {
 		t.Errorf("expected status 'completed' and code 400, got status %q code %d", rec.Status, rec.ResponseCode)
 	}
+
+	// Ensure audit entries exist (attempt, retries, and failure log)
+	auditRepo.mu.Lock()
+	if len(auditRepo.logs) < 4 { // 1 attempt + 2 retries + 1 terminal fail = 4 logs minimum
+		t.Errorf("expected at least 4 audit logs written, got %d", len(auditRepo.logs))
+	}
+	auditRepo.mu.Unlock()
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"log/slog"
+	"os"
 
 	"secpay/config"
 	"secpay/delivery/http/handler"
@@ -13,46 +15,63 @@ import (
 )
 
 func main() {
-	log.Println("Initializing SecPay platform...")
+	// 1. Initialize structured JSON logger globally via slog
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
 
-	// 1. Load application configuration
+	slog.Info("Initializing SecPay platform...")
+
+	// 2. Load application configuration
 	cfg, err := config.LoadConfig(".")
 	if err != nil {
-		log.Fatalf("Fatal: failed to load configuration: %v", err)
+		slog.Error("Fatal: failed to load configuration", slog.Any("error", err))
+		os.Exit(1)
 	}
-	log.Printf("Configuration loaded successfully. Environment: %s", cfg.AppEnv)
+	slog.Info("Configuration loaded successfully", slog.String("env", cfg.AppEnv))
 
-	// 2. Initialize database connection & GORM schema migrations
+	// 3. Initialize database connection & GORM schema migrations
 	db, err := postgres.InitDB(cfg)
 	if err != nil {
-		log.Fatalf("Fatal: failed to initialize database layer: %v", err)
+		slog.Error("Fatal: failed to initialize database layer", slog.Any("error", err))
+		os.Exit(1)
 	}
 
-	// 3. Initialize Clean Architecture database repositories
+	// 4. Initialize Clean Architecture database repositories
 	userRepo := postgres.NewUserRepository(db)
 	accountRepo := postgres.NewAccountRepository(db)
 	txRepo := postgres.NewTransactionRepository(db)
 	idempotencyRepo := postgres.NewIdempotencyRepository(db)
+	auditRepo := postgres.NewAuditLogRepository(db)
 
-	// 4. Initialize Clean Architecture business usecases
+	// 5. Initialize Clean Architecture business usecases
 	// In production, load JWT secret from secure environment configs
 	jwtSecret := "secpay-super-secure-jwt-signing-secret-key-12345"
-	authUsecase := usecase.NewAuthUsecase(userRepo, jwtSecret)
+	authUsecase := usecase.NewAuthUsecase(userRepo, auditRepo, jwtSecret)
 	userUsecase := usecase.NewUserUsecase(userRepo)
 	paymentUsecase := usecase.NewPaymentUsecase(accountRepo, txRepo)
 
-	// 5. Initialize & Start Asynchronous Worker Pool
-	workerPool := usecase.NewWorkerPool(paymentUsecase, idempotencyRepo, txRepo, 4, 100)
+	// 6. Initialize & Start Asynchronous Worker Pool
+	workerPool := usecase.NewWorkerPool(paymentUsecase, idempotencyRepo, txRepo, auditRepo, 4, 100)
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	// 6. Initialize HTTP route handlers
+	// 7. Initialize HTTP route handlers
 	authHandler := handler.NewAuthHandler(authUsecase)
 	kycHandler := handler.NewKYCHandler(userUsecase)
 	paymentHandler := handler.NewPaymentHandler(workerPool, idempotencyRepo)
 
-	// 7. Setup Gin routing engine
-	r := gin.Default()
+	// 8. Setup Gin routing engine with structured logging and rate limiting
+	gin.SetMode(gin.ReleaseMode) // Set to release mode for production logging cleaner
+	r := gin.New()
+	
+	// Register logging and recovery middlewares
+	r.Use(middleware.StructuredLogger(), gin.Recovery())
+	
+	// Safeguard endpoints against DDoS and exhaustion via IP-based Token-Bucket Rate Limiter
+	// Permits 10 requests/second with a burst allowance of 15 tokens per IP
+	r.Use(middleware.RateLimiterMiddleware(10, 15))
 
 	// Public Routes
 	api := r.Group("/api/v1")
@@ -76,8 +95,8 @@ func main() {
 		}
 	}
 
-	// 8. Start HTTP server
-	log.Printf("SecPay HTTP server listening on port %s...", cfg.Port)
+	// 9. Start HTTP server
+	slog.Info("SecPay HTTP server starting", slog.String("port", cfg.Port))
 	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("Fatal: failed to start SecPay server: %v", err)
 	}
