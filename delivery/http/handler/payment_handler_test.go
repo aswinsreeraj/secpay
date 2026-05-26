@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"secpay/domain"
 	"secpay/usecase"
@@ -16,40 +15,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// mockPaymentUsecase mock PaymentUsecase for API testing
-type mockPaymentUsecase struct {
-	usecase.PaymentUsecase
-	processErr error
-	transactionsCalled int
+// mockWorkerPool mock WorkerPool for handler testing
+type mockWorkerPool struct {
+	usecase.WorkerPool
+	jobs       []domain.PaymentJob
+	enqueueErr error
 }
 
-func (m *mockPaymentUsecase) ProcessPayment(ctx context.Context, fromAccountID, toAccountID string, amount int64, description string) (*domain.Transaction, error) {
-	m.transactionsCalled++
-	if m.processErr != nil {
-		return &domain.Transaction{
-			ID:              "tx-fail-123",
-			FromAccountID:   fromAccountID,
-			ToAccountID:     toAccountID,
-			Amount:          amount,
-			TransactionType: "transfer",
-			Status:          domain.TransactionStateFailed,
-			Description:     description + " (Failed)",
-			CreatedAt:       time.Now(),
-		}, m.processErr
+func (m *mockWorkerPool) Enqueue(job domain.PaymentJob) error {
+	if m.enqueueErr != nil {
+		return m.enqueueErr
 	}
-	return &domain.Transaction{
-		ID:              "tx-success-123",
-		FromAccountID:   fromAccountID,
-		ToAccountID:     toAccountID,
-		Amount:          amount,
-		TransactionType: "transfer",
-		Status:          domain.TransactionStateSuccess,
-		Description:     description,
-		CreatedAt:       time.Now(),
-	}, nil
+	m.jobs = append(m.jobs, job)
+	return nil
 }
 
-// mockIdempotencyRepository mock IdempotencyRepository for API testing
+// mockIdempotencyRepository mock IdempotencyRepository for handler testing
 type mockIdempotencyRepository struct {
 	domain.IdempotencyRepository
 	records map[string]*domain.Idempotency
@@ -88,9 +69,9 @@ func TestPaymentHandler(t *testing.T) {
 	validBody := `{"from_account_id":"` + fromAcc + `","to_account_id":"` + toAcc + `","amount":5000,"description":"Rent"}`
 
 	t.Run("missing idempotency-key header fails with 400", func(t *testing.T) {
-		u := &mockPaymentUsecase{}
+		pool := &mockWorkerPool{}
 		repo := newMockIdempotencyRepository()
-		h := NewPaymentHandler(u, repo)
+		h := NewPaymentHandler(pool, repo)
 
 		r := gin.New()
 		r.POST("/api/v1/payments", h.ProcessPayment)
@@ -109,10 +90,10 @@ func TestPaymentHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("successful processing - saves completed response", func(t *testing.T) {
-		u := &mockPaymentUsecase{}
+	t.Run("successful enqueue - returns 202 Accepted and creates started record", func(t *testing.T) {
+		pool := &mockWorkerPool{}
 		repo := newMockIdempotencyRepository()
-		h := NewPaymentHandler(u, repo)
+		h := NewPaymentHandler(pool, repo)
 
 		r := gin.New()
 		r.POST("/api/v1/payments", h.ProcessPayment)
@@ -124,11 +105,11 @@ func TestPaymentHandler(t *testing.T) {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 OK, got %d", w.Code)
+		if w.Code != http.StatusAccepted {
+			t.Errorf("expected 202 Accepted, got %d", w.Code)
 		}
-		if !strings.Contains(w.Body.String(), "Payment processed successfully") {
-			t.Errorf("expected success response, got %s", w.Body.String())
+		if !strings.Contains(w.Body.String(), "Payment request accepted and is processing asynchronously") {
+			t.Errorf("expected accepted message, got %s", w.Body.String())
 		}
 
 		// Verify idempotency record state
@@ -136,58 +117,24 @@ func TestPaymentHandler(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected idempotency record to exist, got %v", err)
 		}
-		if record.Status != "completed" {
-			t.Errorf("expected status 'completed', got %q", record.Status)
-		}
-		if record.ResponseCode != http.StatusOK {
-			t.Errorf("expected response code 200, got %d", record.ResponseCode)
-		}
-		if !strings.Contains(record.ResponseBody, "Payment processed successfully") {
-			t.Errorf("expected cached response body to contain success message, got %q", record.ResponseBody)
-		}
-	})
-
-	t.Run("duplicate request - replays cached completed response", func(t *testing.T) {
-		u := &mockPaymentUsecase{}
-		repo := newMockIdempotencyRepository()
-		h := NewPaymentHandler(u, repo)
-
-		r := gin.New()
-		r.POST("/api/v1/payments", h.ProcessPayment)
-
-		// 1. Submit first request
-		req1 := httptest.NewRequest(http.MethodPost, "/api/v1/payments", bytes.NewBufferString(validBody))
-		req1.Header.Set("Content-Type", "application/json")
-		req1.Header.Set("Idempotency-Key", "key-123")
-
-		w1 := httptest.NewRecorder()
-		r.ServeHTTP(w1, req1)
-
-		// 2. Submit duplicate request with SAME key
-		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/payments", bytes.NewBufferString(validBody))
-		req2.Header.Set("Content-Type", "application/json")
-		req2.Header.Set("Idempotency-Key", "key-123")
-
-		w2 := httptest.NewRecorder()
-		r.ServeHTTP(w2, req2)
-
-		if w2.Code != http.StatusOK {
-			t.Errorf("expected replayed 200 OK, got %d", w2.Code)
-		}
-		if w2.Header().Get("X-Cache-Lookup") != "HIT - Idempotent Request" {
-			t.Errorf("expected cache lookup HIT header, got %q", w2.Header().Get("X-Cache-Lookup"))
+		if record.Status != "started" {
+			t.Errorf("expected status 'started', got %q", record.Status)
 		}
 
-		// Ensure usecase was only called ONCE
-		if u.transactionsCalled != 1 {
-			t.Errorf("expected usecase to be called exactly 1 time, got %d", u.transactionsCalled)
+		// Verify job is enqueued
+		if len(pool.jobs) != 1 {
+			t.Errorf("expected 1 job enqueued, got %d", len(pool.jobs))
+		}
+		enqueuedJob := pool.jobs[0]
+		if enqueuedJob.Amount != 5000 || enqueuedJob.Description != "Rent" {
+			t.Errorf("enqueued job fields mismatch, got %+v", enqueuedJob)
 		}
 	})
 
 	t.Run("concurrent processing - returns 409 Conflict", func(t *testing.T) {
-		u := &mockPaymentUsecase{}
+		pool := &mockWorkerPool{}
 		repo := newMockIdempotencyRepository()
-		h := NewPaymentHandler(u, repo)
+		h := NewPaymentHandler(pool, repo)
 
 		// Add pre-existing "started" record
 		_ = repo.Create(context.Background(), &domain.Idempotency{
@@ -213,37 +160,42 @@ func TestPaymentHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("payment failure - returns 400 Bad Request and caches fail response", func(t *testing.T) {
-		u := &mockPaymentUsecase{
-			processErr: errors.New("insufficient balance"),
-		}
+	t.Run("replay cached response - returns replayed completed response", func(t *testing.T) {
+		pool := &mockWorkerPool{}
 		repo := newMockIdempotencyRepository()
-		h := NewPaymentHandler(u, repo)
+		h := NewPaymentHandler(pool, repo)
+
+		// Add pre-existing completed record
+		_ = repo.Create(context.Background(), &domain.Idempotency{
+			Key:          "key-123",
+			Status:       "completed",
+			ResponseCode: http.StatusOK,
+			ResponseBody: `{"message":"Replayed successfully"}`,
+		})
 
 		r := gin.New()
 		r.POST("/api/v1/payments", h.ProcessPayment)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/payments", bytes.NewBufferString(validBody))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Idempotency-Key", "key-failed")
+		req.Header.Set("Idempotency-Key", "key-123")
 
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("expected 400 Bad Request, got %d", w.Code)
+		if w.Code != http.StatusOK {
+			t.Errorf("expected 200 OK, got %d", w.Code)
 		}
-		if !strings.Contains(w.Body.String(), "insufficient balance") {
-			t.Errorf("expected balance error in body, got %q", w.Body.String())
+		if w.Header().Get("X-Cache-Lookup") != "HIT - Idempotent Request" {
+			t.Errorf("expected cache lookup HIT header, got %q", w.Header().Get("X-Cache-Lookup"))
+		}
+		if w.Body.String() != `{"message":"Replayed successfully"}` {
+			t.Errorf("expected replayed body, got %q", w.Body.String())
 		}
 
-		// Verify cached response state is completed with code 400
-		record, _ := repo.Get(context.Background(), "key-failed")
-		if record.Status != "completed" {
-			t.Errorf("expected status 'completed', got %q", record.Status)
-		}
-		if record.ResponseCode != http.StatusBadRequest {
-			t.Errorf("expected cached code 400, got %d", record.ResponseCode)
+		// Verify no new job was enqueued
+		if len(pool.jobs) != 0 {
+			t.Errorf("expected 0 jobs enqueued, got %d", len(pool.jobs))
 		}
 	})
 }

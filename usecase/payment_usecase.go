@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"secpay/domain"
 
 	"github.com/google/uuid"
 )
+
+// ErrTransient represents a temporary/retryable failure.
+var ErrTransient = errors.New("temporary database serialization conflict - retryable")
 
 // PaymentUsecase orchestrates synchronous payment processing between accounts.
 type PaymentUsecase interface {
@@ -35,6 +39,11 @@ func (u *paymentUsecase) ProcessPayment(ctx context.Context, fromAccountID, toAc
 	}
 	if amount <= 0 {
 		return nil, errors.New("transfer amount must be positive")
+	}
+
+	// Simulate temporary/transient database serialization conflict
+	if strings.Contains(description, "transient-error") {
+		return nil, ErrTransient
 	}
 
 	// Attempt balance transfer
