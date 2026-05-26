@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"secpay/delivery/http/response"
 	"secpay/domain"
 	"secpay/usecase"
 
@@ -38,14 +39,14 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 	// 1. Enforce Idempotency-Key header
 	idempotencyKey := c.GetHeader("Idempotency-Key")
 	if idempotencyKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key header is required"})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: "Idempotency-Key header is required"})
 		return
 	}
 
 	// 2. Validate request payload
 	var req PaymentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -56,7 +57,7 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 	if err == nil {
 		// Key exists: handle duplicate request
 		if record.Status == "started" {
-			c.JSON(http.StatusConflict, gin.H{"error": "transaction is currently in progress"})
+			c.JSON(http.StatusConflict, response.ErrorResponse{Error: "transaction is currently in progress"})
 			return
 		}
 
@@ -77,7 +78,7 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 		UpdatedAt: time.Now(),
 	}
 	if err := h.idempotencyRepo.Create(ctx, newRecord); err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "transaction is currently in progress"})
+		c.JSON(http.StatusConflict, response.ErrorResponse{Error: "transaction is currently in progress"})
 		return
 	}
 
@@ -92,26 +93,25 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 		IdempotencyKey: idempotencyKey,
 		RetryCount:     0,
 		MaxRetries:     3,
-		Backoff:        10 * time.Millisecond, // Small initial backoff for fast concurrent testing
-		Ctx:            context.Background(),  // Detach request context for async execution safety
+		Backoff:        10 * time.Millisecond,
+		Ctx:            context.Background(),
 	}
 
 	if err := h.workerPool.Enqueue(job); err != nil {
 		// Clean up idempotency lock on enqueue failure
-		// Note: GORM's Update/Delete can be used here. For simplicity, set response failed
 		newRecord.Status = "completed"
 		newRecord.ResponseCode = http.StatusInternalServerError
 		newRecord.ResponseBody = `{"error":"failed to enqueue payment job"}`
 		_ = h.idempotencyRepo.Update(ctx, newRecord)
 
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue payment request: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, response.ErrorResponse{Error: "failed to enqueue payment request: " + err.Error()})
 		return
 	}
 
 	// 6. Return 202 Accepted immediately
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "Payment request accepted and is processing asynchronously",
-		"job_id":  jobID,
-		"status":  domain.TransactionStateInitiated,
+	c.JSON(http.StatusAccepted, response.PaymentAcceptedResponse{
+		Message: "Payment request accepted and is processing asynchronously",
+		JobID:   jobID,
+		Status:  domain.TransactionStateInitiated,
 	})
 }

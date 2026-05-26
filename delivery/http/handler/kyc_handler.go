@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"secpay/delivery/http/response"
 	"secpay/usecase"
 
 	"github.com/gin-gonic/gin"
@@ -25,30 +26,30 @@ type KYCUpdateRequest struct {
 func (h *KYCHandler) UpdateKYC(c *gin.Context) {
 	userIDVal, exists := c.Get("userID")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		c.JSON(http.StatusUnauthorized, response.ErrorResponse{Error: "Authentication required"})
 		return
 	}
 
 	userID, ok := userIDVal.(string)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user context"})
+		c.JSON(http.StatusInternalServerError, response.ErrorResponse{Error: "Invalid user context"})
 		return
 	}
 
 	var req KYCUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	err := h.userUsecase.UpdateKYC(c.Request.Context(), userID, req.Status)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "KYC status updated successfully",
-		"kyc_status": req.Status,
+	c.JSON(http.StatusOK, response.KYCVerifyResponse{
+		Message:   "KYC status updated successfully",
+		KYCStatus: req.Status,
 	})
 }

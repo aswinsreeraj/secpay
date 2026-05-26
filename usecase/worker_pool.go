@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -63,10 +64,10 @@ func (p *workerPool) Start() {
 		return
 	}
 
-	log.Printf("Starting concurrent worker pool with %d workers...", p.numWorkers)
+	slog.Info("Starting concurrent worker pool", slog.Int("workers", p.numWorkers))
 	for i := 0; i < p.numWorkers; i++ {
 		p.wg.Add(1)
-		go p.worker(i)
+		go p.workerWithRecovery(i)
 	}
 }
 
@@ -79,11 +80,11 @@ func (p *workerPool) Stop() {
 	p.isStopped = true
 	p.mu.Unlock()
 
-	log.Println("Stopping concurrent worker pool...")
+	slog.Info("Stopping concurrent worker pool...")
 	close(p.stopChan)
 	close(p.queue)
 	p.wg.Wait()
-	log.Println("Worker pool stopped successfully.")
+	slog.Info("Worker pool stopped successfully.")
 }
 
 func (p *workerPool) Enqueue(job domain.PaymentJob) error {
@@ -104,7 +105,30 @@ func (p *workerPool) GetMetrics() domain.WorkerMetrics {
 	return p.metrics
 }
 
-func (p *workerPool) worker(id int) {
+// workerWithRecovery consumes tasks with self-healing panic recovery safeguards.
+func (p *workerPool) workerWithRecovery(id int) {
+	defer func() {
+		if r := recover(); r != nil {
+			stackTrace := string(debug.Stack())
+			slog.Error("CRITICAL: Panic recovered in background worker Goroutine. Self-healing restart triggered.",
+				slog.Int("worker_id", id),
+				slog.Any("panic", r),
+				slog.String("stack_trace", stackTrace),
+			)
+
+			p.metrics.DecrementActive()
+			p.wg.Done()
+
+			// Auto-restart: spawn a replacement worker to maintain queue consuming capacity
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if !p.isStopped {
+				p.wg.Add(1)
+				go p.workerWithRecovery(id)
+			}
+		}
+	}()
+
 	p.metrics.IncrementActive()
 	defer p.metrics.DecrementActive()
 	defer p.wg.Done()
@@ -146,8 +170,12 @@ func (p *workerPool) processJob(job domain.PaymentJob) {
 				p.metrics.IncrementRetried()
 				job.RetryCount++
 				
-				log.Printf("[Worker] Temporary failure for job %s. Retrying in %v (Retry %d/%d)...",
-					job.ID, job.Backoff, job.RetryCount, job.MaxRetries)
+				slog.Warn("Temporary failure for payment job. Scheduling retry.",
+					slog.String("job_id", job.ID),
+					slog.Int("retry", job.RetryCount),
+					slog.Int("max_retries", job.MaxRetries),
+					slog.Duration("backoff", job.Backoff),
+				)
 
 				// Audit temporary failure retry event
 				_ = p.auditRepo.Create(ctx, &domain.AuditLog{

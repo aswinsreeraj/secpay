@@ -67,7 +67,7 @@ func main() {
 	r := gin.New()
 	
 	// Register logging and recovery middlewares
-	r.Use(middleware.StructuredLogger(), gin.Recovery())
+	r.Use(middleware.StructuredLogger(), middleware.RecoveryMiddleware())
 	
 	// Safeguard endpoints against DDoS and exhaustion via IP-based Token-Bucket Rate Limiter
 	// Permits 10 requests/second with a burst allowance of 15 tokens per IP

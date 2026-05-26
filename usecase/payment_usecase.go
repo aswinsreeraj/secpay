@@ -34,6 +34,9 @@ func NewPaymentUsecase(accountRepo domain.AccountRepository, txRepo domain.Trans
 }
 
 func (u *paymentUsecase) ProcessPayment(ctx context.Context, fromAccountID, toAccountID string, amount int64, description string) (*domain.Transaction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if fromAccountID == toAccountID {
 		return nil, errors.New("cannot transfer money to the same account")
 	}

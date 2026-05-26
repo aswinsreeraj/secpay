@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"secpay/delivery/http/response"
 	"secpay/usecase"
 
 	"github.com/gin-gonic/gin"
@@ -28,23 +29,23 @@ type RegisterRequest struct {
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	user, err := h.authUsecase.Register(c.Request.Context(), req.Name, req.Email, req.Password)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "User registered successfully",
-		"user": gin.H{
-			"id":         user.ID,
-			"name":       user.Name,
-			"email":      user.Email,
-			"kyc_status": user.KYCStatus,
+	c.JSON(http.StatusCreated, response.RegisterResponse{
+		Message: "User registered successfully",
+		User: response.UserSummary{
+			ID:        user.ID,
+			Name:      user.Name,
+			Email:     user.Email,
+			KYCStatus: user.KYCStatus,
 		},
 	})
 }
@@ -58,18 +59,18 @@ type LoginRequest struct {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	token, err := h.authUsecase.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token": token,
+	c.JSON(http.StatusOK, response.LoginResponse{
+		Token: token,
 	})
 }
 
@@ -81,18 +82,18 @@ type MFARequest struct {
 func (h *AuthHandler) VerifyMFA(c *gin.Context) {
 	var req MFARequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, response.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	valid, err := h.authUsecase.VerifyMFA(c.Request.Context(), req.Code)
 	if err != nil || !valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired MFA code"})
+		c.JSON(http.StatusUnauthorized, response.ErrorResponse{Error: "Invalid or expired MFA code"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "MFA verified successfully",
-		"status":  "authorized",
+	c.JSON(http.StatusOK, response.MFAVerifyResponse{
+		Message: "MFA verified successfully",
+		Status:  "authorized",
 	})
 }
